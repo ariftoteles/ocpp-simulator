@@ -8,8 +8,17 @@ class EVCharger {
     this.transactionId = null;
     this.meterInterval = null;
     this.pendingRequests = new Map();
+    this.isConnected = false; // Flag status koneksi
 
-    this.ws.on('open', () => this.onConnect());
+    // Tunggu sampai koneksi terbuka
+    this.ws.on('open', () => {
+      this.isConnected = true;
+      this.onConnect(); // Kirim BootNotification setelah koneksi siap
+    });
+
+    this.ws.on('error', (error) => {
+      console.error(`[CLIENT ${chargerId}] Connection error:`, error);
+    });
     this.ws.on('message', (data) => this.handleMessage(data));
     this.ws.on('close', () => console.log('Disconnected from server'));
   }
@@ -103,7 +112,7 @@ class EVCharger {
 }
 
 // Jalankan charger
-const charger = new EVCharger('CHARGER_001', 'ws://localhost:9220');
+const charger = new EVCharger('CHARGER_001', 'ws://localhost:9221');
 
 /**
  * Standard request for ocpp v1.6
