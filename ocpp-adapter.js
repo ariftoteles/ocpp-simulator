@@ -1,74 +1,84 @@
 const WebSocket = require('ws');
 const ModbusRTU = require('modbus-serial');
-const net = require('net');
 
 class OCPPAdapter {
   constructor(serverPort, upstreamServerUrl, scadaConfig) {
     this.server = new WebSocket.Server({ port: serverPort });
     this.upstreamServerUrl = upstreamServerUrl;
-    
-    // Inisialisasi Modbus TCP Client
-    this.modbusClient = new ModbusRTU();
     this.scadaConfig = scadaConfig;
-
-    // Hubungkan ke SCADA Modbus
-    this.connectToScada();
+    this.modbusClient = new ModbusRTU();
+    
+    this.connectToScada(); // comment this section if you want to running service without connect to modbus
     this.setupServer();
   }
 
-  async connectToScada() {
+  async connectToScada() { 
     try {
-      // Untuk Modbus TCP
-      await this.modbusClient.connectTCP(this.scadaConfig.host, {
-        port: this.scadaConfig.port
-      });
-      console.log('[SCADA] Connected to Modbus TCP server');
-      
-      // Untuk Modbus RTU (jika menggunakan serial):
-      // this.modbusClient.connectRTU("/dev/ttyUSB0", { baudRate: 9600 });
+      await this.modbusClient.connectTCP(this.scadaConfig.host, { port: this.scadaConfig.port });
+      console.log('[SCADA] Modbus connected');
     } catch (error) {
-      console.error('[SCADA] Connection error:', error);
+      console.error('[SCADA] Modbus error:', error);
     }
   }
 
   setupServer() {
     this.server.on('connection', (downstreamWs, req) => {
       const chargerId = new URL(req.url, `http://${req.headers.host}`).searchParams.get('chargerId');
-      console.log(`Charger connected: ${chargerId}`);
-  
-      const upstreamWs = new WebSocket(`${this.upstreamServerUrl}?chargerId=${chargerId}`);
-      const messageQueue = []; // Antrian pesan sementara
-  
-      // Teruskan pesan hanya setelah upstream terbuka
+      console.log(`[ADAPTER] Charger ${chargerId} connected`);
+
+      // Koneksi ke upstream server
+      const upstreamWs = new WebSocket(this.upstreamServerUrl);
+      const messageQueue = [];
+
+      // Teruskan pesan dari upstream (server) ke downstream (charger)
+      upstreamWs.on('message', (data) => {
+        if (downstreamWs.readyState === WebSocket.OPEN) {
+          downstreamWs.send(data);
+          console.log(`[ADAPTER] Forwarded server response to ${chargerId}:`, data.toString());
+        }
+      });
+
+      // Teruskan pesan dari downstream (charger) ke upstream (server)
+      downstreamWs.on('message', (data) => {
+        if (upstreamWs.readyState === WebSocket.OPEN) {
+          upstreamWs.send(data);
+          console.log(`[ADAPTER] Forwarded client message to server:`, data.toString());
+          this.sendToScada(chargerId, data); // comment this section if you want to running service without connect to modbus
+        } else {
+          messageQueue.push(data);
+        }
+      });
+
+      // Handle koneksi upstream terbuka
       upstreamWs.on('open', () => {
-        // Proses pesan yang tertahan
         messageQueue.forEach(data => upstreamWs.send(data));
         messageQueue.length = 0;
-      });
-  
-      downstreamWs.on('message', (data) => {
-        // Jika upstream belum terbuka, simpan di antrian
-        if (upstreamWs.readyState !== WebSocket.OPEN) {
-          messageQueue.push(data);
-          return;
-        }
-  
-        // Teruskan ke upstream server
-        upstreamWs.send(data);
-        
-        // Kirim ke SCADA
-        this.sendToScada(chargerId, data);
+        console.log(`[ADAPTER] Upstream connected for ${chargerId}`);
       });
     });
   }
+
+  async sendToScada(chargerId, data) {
+    try {
+      const message = JSON.parse(data);
+      const [_, __, action, payload] = message;
+
+      if (action === 'MeterValues') {
+        const energy = payload.meterValue[0].sampledValue[0].value;
+        const soc = payload.meterValue[0].sampledValue[1]?.value || 0;
+        
+        await this.modbusClient.writeRegisters(0, [energy, soc]);
+        console.log(`[SCADA] Charger ${chargerId} data sent: ${energy} Wh, ${soc}%`);
+      }
+    } catch (error) {
+      console.error(`[SCADA] Error processing data from ${chargerId}:`, error);
+    }
+  }
 }
 
-// Konfigurasi
-const adapter = new OCPPAdapter(
-  9221, // Port adapter
+// Jalankan adapter
+new OCPPAdapter(
+  9221, 
   'ws://localhost:9220', // OCPP Server
-  {
-    host: '192.168.1.100', // Alamat SCADA
-    port: 502 // Port Modbus TCP
-  }
+  { host: '127.0.0.1', port: 502 } // SCADA
 );
